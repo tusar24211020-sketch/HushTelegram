@@ -71,9 +71,8 @@ jobs:
 
           # Disable Gradle dependency verification at the source: Gradle only enforces
           # verification if gradle/verification-metadata.xml exists, so removing it
-          # (plus the --dependency-verification=off CLI flag in the build step) prevents
-          # failures like the junit-bom-5.13.4 checksum mismatch without relying on any
-          # fabricated or undocumented property.
+          # (plus --dependency-verification=off in the build step) prevents failures
+          # like a junit-bom checksum mismatch without relying on any undocumented flag.
           for meta_path in glob.glob("**/gradle/verification-metadata.xml", recursive=True):
               try:
                   os.remove(meta_path)
@@ -93,12 +92,30 @@ jobs:
                   content = f.read()
 
               content = content.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
+
               if ayu_ver:
                   content = content.replace('"13.1.0"', f'"{ayu_ver}"')
                   content = content.replace('"13.1.1"', f'"{ayu_ver}"')
               else:
+                  # Strip AppTarget(version = "...") calls entirely so matching becomes
+                  # version-agnostic.
                   content = re.sub(r'AppTarget\s*\(\s*version\s*=\s*"[^"]+"[^)]*\)', '', content)
-                  content = re.sub(r'"13\.1\.[01]"', 'null', content)
+
+                  # Any remaining "13.1.0"/"13.1.1" literals get nulled out — but a bare
+                  # `null` is NOT a valid const val (Kotlin: TYPE_CANT_BE_USED_FOR_CONST_VAL,
+                  # "Const 'val' has type 'Nothing?'"). So for const val lines, drop `const`
+                  # and widen an explicit String type to String? before nulling.
+                  new_lines = []
+                  for line in content.split('\n'):
+                      if re.search(r'"13\.1\.[01]"', line):
+                          if re.search(r'\bconst\s+val\b', line):
+                              line = re.sub(r'\bconst\s+val\b', 'val', line)
+                              line = re.sub(r':\s*String\b(?!\?)', ': String?', line)
+                              line = re.sub(r'"13\.1\.[01]"', 'null', line)
+                          else:
+                              line = re.sub(r'"13\.1\.[01]"', 'null', line)
+                      new_lines.append(line)
+                  content = '\n'.join(new_lines)
 
               with open(path, "w", encoding="utf-8") as f:
                   f.write(content)
@@ -211,8 +228,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Only add files that actually exist, so a missing patches-list.json
-          # (path/output mismatch from generatePatchesList) can't fail this step.
           FILES_TO_ADD=""
           [ -f patches-bundle.json ] && FILES_TO_ADD="$FILES_TO_ADD patches-bundle.json"
           [ -f patches-list.json ] && FILES_TO_ADD="$FILES_TO_ADD patches-list.json"
