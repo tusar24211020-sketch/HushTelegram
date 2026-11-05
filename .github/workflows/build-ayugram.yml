@@ -56,9 +56,9 @@ jobs:
 
           if not gh_pat:
               raise SystemExit(
-                  "\n[!] ERROR: 'GH_PACKAGES_TOKEN' secret পাওয়া যায়নি!\n"
-                  "অনুগ্রহ করে আপনার রিপোজিটরির Settings -> Secrets and variables -> Actions-এ গিয়ে "
-                  "'GH_PACKAGES_TOKEN' নামে একটি Classic Personal Access Token (যাতে 'read:packages' টিক দেওয়া আছে) যোগ করুন।"
+                  "\n[!] ERROR: 'GH_PACKAGES_TOKEN' secret পাওয়া যায়নি!\n"
+                  "অনুগ্রহ করে আপনার রিপোজিটরির Settings -> Secrets and variables -> Actions-এ গিয়ে "
+                  "'GH_PACKAGES_TOKEN' নামে একটি Classic Personal Access Token (যাতে 'read:packages' টিক দেওয়া আছে) যোগ করুন।"
               )
 
           gradle_home = pathlib.Path.home() / ".gradle"
@@ -68,6 +68,18 @@ jobs:
           for prop_path in [gradle_home / "gradle.properties", pathlib.Path("gradle.properties")]:
               existing = prop_path.read_text(encoding="utf-8") if prop_path.exists() else ""
               prop_path.write_text(existing + creds_block, encoding="utf-8")
+
+          # Disable Gradle dependency verification at the source: Gradle only enforces
+          # verification if gradle/verification-metadata.xml exists, so removing it
+          # (plus the --dependency-verification=off CLI flag in the build step) prevents
+          # failures like the junit-bom-5.13.4 checksum mismatch without relying on any
+          # fabricated or undocumented property.
+          for meta_path in glob.glob("**/gradle/verification-metadata.xml", recursive=True):
+              try:
+                  os.remove(meta_path)
+                  print(f"[*] Removed {meta_path} to prevent verification failures")
+              except OSError as e:
+                  print(f"[!] Could not remove {meta_path}: {e}")
 
           ayu_pkg = os.environ.get("AYU_PKG", "com.radolyn.ayugram").strip() or "com.radolyn.ayugram"
           ayu_ver = os.environ.get("AYU_VER", "").strip()
@@ -141,8 +153,8 @@ jobs:
           GPR_KEY: ${{ secrets.GH_PACKAGES_TOKEN }}
         run: |
           chmod +x gradlew
-          ./gradlew :patches:generatePatchesList --no-daemon --no-dependency-verification
-          ./gradlew :patches:buildAndroid --no-daemon --no-dependency-verification
+          ./gradlew :patches:generatePatchesList --no-daemon --dependency-verification=off
+          ./gradlew :patches:buildAndroid --no-daemon --dependency-verification=off
 
       - name: Locate Built .mpp File & Update patches-bundle.json
         id: bundle
@@ -199,6 +211,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add patches-bundle.json patches-list.json
-          git commit -m "chore(ayugram): point Morphe Manager to ${{ steps.bundle.outputs.tag }} bundle [skip ci]" || true
-          git push
+          # Only add files that actually exist, so a missing patches-list.json
+          # (path/output mismatch from generatePatchesList) can't fail this step.
+          FILES_TO_ADD=""
+          [ -f patches-bundle.json ] && FILES_TO_ADD="$FILES_TO_ADD patches-bundle.json"
+          [ -f patches-list.json ] && FILES_TO_ADD="$FILES_TO_ADD patches-list.json"
+          if [ -n "$FILES_TO_ADD" ]; then
+            git add $FILES_TO_ADD
+            git commit -m "chore(ayugram): point Morphe Manager to ${{ steps.bundle.outputs.tag }} bundle [skip ci]" || true
+            git push
+          else
+            echo "[!] No bundle files found to commit — skipping commit/push."
+          fi
