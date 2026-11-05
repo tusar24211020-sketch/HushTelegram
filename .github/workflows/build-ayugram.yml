@@ -41,14 +41,42 @@ jobs:
         with:
           packages: 'cmdline-tools;latest platform-tools build-tools;34.0.0 platforms;android-34'
 
-      - name: Patch Compatibility for AyuGram
+      - name: Configure GitHub Packages Auth & Patch AyuGram Compatibility
         shell: python
         env:
           AYU_PKG: ${{ inputs.ayugram_package || 'com.radolyn.ayugram' }}
           AYU_VER: ${{ inputs.ayugram_version || '' }}
+          GH_USER: ${{ github.actor }}
+          GH_PAT: ${{ secrets.GH_PACKAGES_TOKEN }}
         run: |
-          import os, re, glob
+          import os, re, glob, pathlib
 
+          gh_user = os.environ.get("GH_USER", "").strip()
+          gh_pat = os.environ.get("GH_PAT", "").strip()
+
+          if not gh_pat:
+              raise SystemExit(
+                  "\n[!] ERROR: 'GH_PACKAGES_TOKEN' secret পাওয়া যায়নি!\n"
+                  "অনুগ্রহ করে আপনার রিপোজিটরির Settings -> Secrets and variables -> Actions-এ গিয়ে "
+                  "'GH_PACKAGES_TOKEN' নামে একটি Classic Personal Access Token (যাতে 'read:packages' টিক দেওয়া আছে) যোগ করুন।"
+              )
+
+          # 1. Write credentials to ~/.gradle/gradle.properties and project gradle.properties
+          gradle_home = pathlib.Path.home() / ".gradle"
+          gradle_home.mkdir(parents=True, exist_ok=True)
+          creds_block = f"\ngpr.user={gh_user}\ngpr.key={gh_pat}\n"
+
+          for prop_path in [gradle_home / "gradle.properties", pathlib.Path("gradle.properties")]:
+              existing = prop_path.read_text(encoding="utf-8") if prop_path.exists() else ""
+              prop_path.write_text(existing + creds_block, encoding="utf-8")
+
+          # 2. Ensure settings.gradle.kts uses GH_PAT directly if needed
+          if os.path.exists("settings.gradle.kts"):
+              with open("settings.gradle.kts", "r", encoding="utf-8") as f:
+                  s_content = f.read()
+              print("[*] Checked settings.gradle.kts for GitHub Packages repository configuration.")
+
+          # 3. Unlock AppCompatibilities.kt for AyuGram
           ayu_pkg = os.environ.get("AYU_PKG", "com.radolyn.ayugram").strip() or "com.radolyn.ayugram"
           ayu_ver = os.environ.get("AYU_VER", "").strip()
 
@@ -71,6 +99,7 @@ jobs:
               with open(path, "w", encoding="utf-8") as f:
                   f.write(content)
 
+          # 4. Isolate "Hide sender names when forwarding" & required HushTelegram settings
           kt_files = glob.glob("patches/src/main/kotlin/**/*.kt", recursive=True)
           keep_enabled_keywords = [
               "Hide sender names when forwarding",
@@ -111,12 +140,14 @@ jobs:
                   with open(path, "w", encoding="utf-8") as f:
                       f.write(text)
 
-          print("[+] Successfully configured HushTelegram repository for AyuGram.")
+          print("[+] Successfully configured auth and AyuGram patch compatibility.")
 
       - name: Build Morphe Patch Bundle (.mpp)
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+          GPR_USER: ${{ github.actor }}
+          GPR_KEY: ${{ secrets.GH_PACKAGES_TOKEN }}
         run: |
           chmod +x gradlew
           ./gradlew :patches:generatePatchesList --no-daemon
