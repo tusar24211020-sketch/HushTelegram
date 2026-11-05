@@ -131,11 +131,31 @@ jobs:
           rewrite(ext_path, patch_app)
           print("[+] TELEGRAM_APPLICATION -> org.telegram.messenger.ApplicationLoader")
 
+          # ---- 4b. Native "HushTelegram" row inside Telegram's Settings screen ---------
+          # That row is wired by matching Telegram's exact settings-screen bytecode, which
+          # AyuGram changes (it throws "native self-settings row builder is missing or
+          # ambiguous"). The patch already supports running without it: resolveNativeSettings()
+          # returns null and HushTelegram settings stays reachable from the app icon's
+          # long-press shortcut and from Android's App info > "Additional settings in the app".
+          settings_path = "patches/src/main/kotlin/app/morphe/patches/telegram/misc/settings/SettingsPatch.kt"
+          old_gate = "if (candidates.isEmpty() && shells.isEmpty()) return null"
+          new_gate = "if ((candidates.isEmpty() && shells.isEmpty()) || classes.isNotEmpty()) return null"
+
+          def patch_native(src):
+              if src.count(old_gate) != 1:
+                  raise SystemExit(f"[!] expected exactly one '{old_gate}' in {settings_path}; source changed")
+              return src.replace(old_gate, new_gate)
+
+          rewrite(settings_path, patch_native)
+          print("[+] Native settings row skipped (AyuGram's settings screen differs)")
+
           # ---- 5. Final sanity check --------------------------------------------------
           with open(compat_path, encoding="utf-8") as f:
               assert f'"{ayu_pkg}"' in f.read(), "compat package rewrite missing"
           with open(ext_path, encoding="utf-8") as f:
               assert new_app in f.read(), "application class rewrite missing"
+          with open(settings_path, encoding="utf-8") as f:
+              assert new_gate in f.read(), "native row skip missing"
 
           print("[+] Successfully configured auth and AyuGram patch compatibility.")
 
