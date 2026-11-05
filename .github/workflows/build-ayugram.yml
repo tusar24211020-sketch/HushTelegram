@@ -38,71 +38,78 @@ jobs:
           packages: 'cmdline-tools;latest platform-tools build-tools;34.0.0 platforms;android-34'
 
       - name: Patch Compatibility for AyuGram & Isolate Forwarding Patch
+        shell: python
         env:
           AYU_PKG: ${{ inputs.ayugram_package }}
           AYU_VER: ${{ inputs.ayugram_version }}
         run: |
-          if [ -f "scripts/patch_ayugram.py" ]; then
-            python3 scripts/patch_ayugram.py
-          else
-            python3 - << 'EOF'
-            import os, re, glob
+          import os, re, glob
 
-            ayu_pkg = os.environ.get("AYU_PKG", "com.radolyn.ayugram").strip()
-            ayu_ver = os.environ.get("AYU_VER", "").strip()
+          ayu_pkg = os.environ.get("AYU_PKG", "com.radolyn.ayugram").strip()
+          ayu_ver = os.environ.get("AYU_VER", "").strip()
 
-            compat_files = glob.glob("patches/src/main/kotlin/**/AppCompatibilities.kt", recursive=True)
-            for path in compat_files:
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
+          print(f"[*] Target Package: {ayu_pkg}")
+          print(f"[*] Target Version: {ayu_ver if ayu_ver else 'ALL (Universal)'}")
 
-                content = content.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
-                if ayu_ver:
-                    content = content.replace('"13.1.0"', f'"{ayu_ver}"')
-                    content = content.replace('"13.1.1"', f'"{ayu_ver}"')
-                else:
-                    content = re.sub(r'AppTarget\s*\(\s*version\s*=\s*"[^"]+"[^)]*\)', '', content)
-                    content = re.sub(r'"13\.1\.[01]"', 'null', content)
+          compat_files = glob.glob("patches/src/main/kotlin/**/AppCompatibilities.kt", recursive=True)
+          for path in compat_files:
+              with open(path, "r", encoding="utf-8") as f:
+                  content = f.read()
 
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
+              print(f"[*] Modifying compatibility file: {path}")
+              content = content.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
 
-            kt_files = glob.glob("patches/src/main/kotlin/**/*.kt", recursive=True)
-            keep_enabled_keywords = [
-                "Hide sender names when forwarding",
-                "HideSender",
-                "Forward",
-                "HushTelegram settings",
-                "SettingsPatch",
-                "ExtensionPatch",
-                "SharedExtension"
-            ]
-            for path in kt_files:
-                with open(path, "r", encoding="utf-8") as f:
-                    text = f.read()
+              if ayu_ver:
+                  content = content.replace('"13.1.0"', f'"{ayu_ver}"')
+                  content = content.replace('"13.1.1"', f'"{ayu_ver}"')
+              else:
+                  content = re.sub(r'AppTarget\s*\(\s*version\s*=\s*"[^"]+"[^)]*\)', '', content)
+                  content = re.sub(r'"13\.1\.[01]"', 'null', content)
 
-                modified = False
-                if '"org.telegram.messenger.web"' in text:
-                    text = text.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
-                    modified = True
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(content)
 
-                is_target_patch = any(k.lower() in text.lower() or k.lower() in path.lower() for k in keep_enabled_keywords)
-                if not is_target_patch:
-                    new_text = re.sub(r'\buse\s*=\s*true\b', 'use = false', text)
-                    if new_text != text:
-                        text = new_text
-                        modified = True
-                else:
-                    new_text = re.sub(r'\buse\s*=\s*false\b', 'use = true', text)
-                    if new_text != text:
-                        text = new_text
-                        modified = True
+          kt_files = glob.glob("patches/src/main/kotlin/**/*.kt", recursive=True)
+          keep_enabled_keywords = [
+              "Hide sender names when forwarding",
+              "HideSender",
+              "Forward",
+              "HushTelegram settings",
+              "SettingsPatch",
+              "ExtensionPatch",
+              "SharedExtension"
+          ]
 
-                if modified:
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(text)
-            EOF
-          fi
+          for path in kt_files:
+              with open(path, "r", encoding="utf-8") as f:
+                  text = f.read()
+
+              modified = False
+              if '"org.telegram.messenger.web"' in text:
+                  text = text.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
+                  modified = True
+
+              is_target_patch = any(
+                  k.lower() in text.lower() or k.lower() in path.lower()
+                  for k in keep_enabled_keywords
+              )
+
+              if not is_target_patch:
+                  new_text = re.sub(r'use\s*=\s*true', 'use = false', text)
+                  if new_text != text:
+                      text = new_text
+                      modified = True
+              else:
+                  new_text = re.sub(r'use\s*=\s*false', 'use = true', text)
+                  if new_text != text:
+                      text = new_text
+                      modified = True
+
+              if modified:
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(text)
+
+          print("[+] Successfully configured HushTelegram repository for AyuGram.")
 
       - name: Build Morphe Patch Bundle (.mpp)
         env:
@@ -122,7 +129,7 @@ jobs:
             exit 1
           fi
           MPP_FILENAME=$(basename "$MPP_PATH")
-          VERSION=$(echo "$MPP_FILENAME" | sed -E 's/patches-(.*)\.mpp/\1/')
+          VERSION=$(echo "$MPP_FILENAME" | sed -E 's/patches-(.*)\.mpp//')
           TAG="v${VERSION}-ayugram"
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${MPP_FILENAME}"
 
@@ -131,18 +138,21 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-          python3 - << EOF
-          import json, datetime
+          python3 -c '
+          import json, datetime, os
           bundle_data = {
             "created_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
-            "description": "Custom HushTelegram build for AyuGram (${{ inputs.ayugram_package }}) - Hide sender names when forwarding",
-            "download_url": "${DOWNLOAD_URL}",
+            "description": "Custom HushTelegram build for AyuGram (" + os.environ.get("AYU_PKG", "com.radolyn.ayugram") + ") - Hide sender names when forwarding",
+            "download_url": os.environ["DOWNLOAD_URL"],
             "signature_download_url": "",
-            "version": "${VERSION}-ayugram"
+            "version": os.environ["VERSION"] + "-ayugram"
           }
           with open("patches-bundle.json", "w", encoding="utf-8") as f:
               json.dump(bundle_data, f, indent=2)
-          EOF
+          '
+        env:
+          AYU_PKG: ${{ inputs.ayugram_package }}
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/v${{ steps.bundle.outputs.version }}-ayugram/${{ steps.bundle.outputs.mpp_filename }}
 
       - name: Create GitHub Release with .mpp Bundle
         uses: softprops/action-gh-release@v2
