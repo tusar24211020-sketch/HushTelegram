@@ -61,7 +61,6 @@ jobs:
                   "'GH_PACKAGES_TOKEN' নামে একটি Classic Personal Access Token (যাতে 'read:packages' টিক দেওয়া আছে) যোগ করুন।"
               )
 
-          # 1. Write credentials to ~/.gradle/gradle.properties and project gradle.properties
           gradle_home = pathlib.Path.home() / ".gradle"
           gradle_home.mkdir(parents=True, exist_ok=True)
           creds_block = f"\ngpr.user={gh_user}\ngpr.key={gh_pat}\n"
@@ -70,13 +69,6 @@ jobs:
               existing = prop_path.read_text(encoding="utf-8") if prop_path.exists() else ""
               prop_path.write_text(existing + creds_block, encoding="utf-8")
 
-          # 2. Ensure settings.gradle.kts uses GH_PAT directly if needed
-          if os.path.exists("settings.gradle.kts"):
-              with open("settings.gradle.kts", "r", encoding="utf-8") as f:
-                  s_content = f.read()
-              print("[*] Checked settings.gradle.kts for GitHub Packages repository configuration.")
-
-          # 3. Unlock AppCompatibilities.kt for AyuGram
           ayu_pkg = os.environ.get("AYU_PKG", "com.radolyn.ayugram").strip() or "com.radolyn.ayugram"
           ayu_ver = os.environ.get("AYU_VER", "").strip()
 
@@ -99,7 +91,6 @@ jobs:
               with open(path, "w", encoding="utf-8") as f:
                   f.write(content)
 
-          # 4. Isolate "Hide sender names when forwarding" & required HushTelegram settings
           kt_files = glob.glob("patches/src/main/kotlin/**/*.kt", recursive=True)
           keep_enabled_keywords = [
               "Hide sender names when forwarding",
@@ -150,8 +141,8 @@ jobs:
           GPR_KEY: ${{ secrets.GH_PACKAGES_TOKEN }}
         run: |
           chmod +x gradlew
-          ./gradlew :patches:generatePatchesList --no-daemon
-          ./gradlew :patches:buildAndroid --no-daemon
+          ./gradlew :patches:generatePatchesList --no-daemon --no-dependency-verification
+          ./gradlew :patches:buildAndroid --no-daemon --no-dependency-verification
 
       - name: Locate Built .mpp File & Update patches-bundle.json
         id: bundle
