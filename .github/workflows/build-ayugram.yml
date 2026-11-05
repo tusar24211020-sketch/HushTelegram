@@ -12,13 +12,17 @@ on:
         required: true
         default: "com.radolyn.ayugram"
       ayugram_version:
-        description: "Target AyuGram Version"
+        description: "Target AyuGram Version (leave empty to keep 13.1.1)"
         required: false
         default: ""
 
 permissions:
   contents: write
   packages: read
+
+concurrency:
+  group: build-ayugram-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-ayugram-bundle:
@@ -61,15 +65,15 @@ jobs:
                   "'GH_PACKAGES_TOKEN' নামে একটি Classic Personal Access Token (যাতে 'read:packages' টিক দেওয়া আছে) যোগ করুন।"
               )
 
+          # ---- 1. GitHub Packages credentials for Gradle -------------------------------
           gradle_home = pathlib.Path.home() / ".gradle"
           gradle_home.mkdir(parents=True, exist_ok=True)
           creds_block = f"\ngpr.user={gh_user}\ngpr.key={gh_pat}\n"
-
           for prop_path in [gradle_home / "gradle.properties", pathlib.Path("gradle.properties")]:
               existing = prop_path.read_text(encoding="utf-8") if prop_path.exists() else ""
               prop_path.write_text(existing + creds_block, encoding="utf-8")
 
-          # Remove stale dependency verification metadata (junit-bom checksum mismatch).
+          # ---- 2. Stale dependency verification metadata (junit-bom checksum mismatch) --
           for meta_path in glob.glob("**/gradle/verification-metadata.xml", recursive=True):
               try:
                   os.remove(meta_path)
@@ -79,65 +83,59 @@ jobs:
 
           ayu_pkg = os.environ.get("AYU_PKG", "com.radolyn.ayugram").strip() or "com.radolyn.ayugram"
           ayu_ver = os.environ.get("AYU_VER", "").strip()
-
           print(f"[*] Target Package: {ayu_pkg}")
-          print(f"[*] Target Version: {ayu_ver if ayu_ver else 'upstream default (unchanged)'}")
+          print(f"[*] Target Version: {ayu_ver if ayu_ver else 'upstream default (13.1.1), unchanged'}")
 
-          compat_files = glob.glob("patches/src/main/kotlin/**/AppCompatibilities.kt", recursive=True)
-          for path in compat_files:
+          def rewrite(path, transform):
+              """Read a file, apply transform, write back. Fails loudly if the file is missing."""
+              if not os.path.isfile(path):
+                  raise SystemExit(f"[!] Expected file not found: {path} (patch source layout changed)")
               with open(path, "r", encoding="utf-8") as f:
-                  content = f.read()
-
-              content = content.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
-
-              # IMPORTANT: never null out version strings. AppTarget throws
-              # "Version codes requires declaring a version string" if a version
-              # code is declared while the version is null. Version strings are
-              # only replaced when the user explicitly supplies a version.
-              if ayu_ver:
-                  content = content.replace('"13.1.0"', f'"{ayu_ver}"')
-                  content = content.replace('"13.1.1"', f'"{ayu_ver}"')
-
+                  old = f.read()
+              new = transform(old)
               with open(path, "w", encoding="utf-8") as f:
-                  f.write(content)
+                  f.write(new)
 
-          kt_files = glob.glob("patches/src/main/kotlin/**/*.kt", recursive=True)
-          keep_enabled_keywords = [
-              "Hide sender names when forwarding",
-              "HideSender",
-              "Forward",
-              "HushTelegram settings",
-              "SettingsPatch",
-              "ExtensionPatch",
-              "SharedExtension"
-          ]
+          # ---- 3. Compatibility: let Morphe Manager offer the patches for AyuGram -------
+          # Only the telegram.org entry ("org.telegram.messenger.web") is retargeted; that
+          # entry already carries version 13.1.1 / code 72379, the same as AyuGram 13.1.1.
+          compat_path = "patches/src/main/kotlin/app/morphe/patches/shared/compat/AppCompatibilities.kt"
 
-          for path in kt_files:
-              with open(path, "r", encoding="utf-8") as f:
-                  text = f.read()
+          def patch_compat(src):
+              web = '"org.telegram.messenger.web"'
+              if web not in src:
+                  raise SystemExit(f"[!] {web} not found in {compat_path}; source changed")
+              src = src.replace(web, f'"{ayu_pkg}"')
+              # Never null a version: AppTarget throws "Version codes requires declaring a
+              # version string". A version is only replaced when explicitly supplied.
+              if ayu_ver:
+                  src = src.replace('"13.1.0"', f'"{ayu_ver}"').replace('"13.1.1"', f'"{ayu_ver}"')
+              return src
 
-              modified = False
-              if '"org.telegram.messenger.web"' in text:
-                  text = text.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
-                  modified = True
+          rewrite(compat_path, patch_compat)
+          print(f"[+] Compatibility now targets {ayu_pkg}")
 
-              is_target_patch = any(
-                  k.lower() in text.lower() or k.lower() in path.lower()
-                  for k in keep_enabled_keywords
-              )
+          # ---- 4. Application class --------------------------------------------------
+          # Official Telegram's Application class is ApplicationLoaderImpl. AyuGram's is
+          # org.telegram.messenger.ApplicationLoader (no "Impl") and it declares onCreate().
+          # Verified against the AyuGram 13.1.1 APK: manifest + dex.
+          ext_path = "patches/src/main/kotlin/app/morphe/patches/telegram/misc/extension/TelegramExtensionPatch.kt"
+          old_app = '"Lorg/telegram/messenger/ApplicationLoaderImpl;"'
+          new_app = '"Lorg/telegram/messenger/ApplicationLoader;"'
 
-              if not is_target_patch:
-                  new_text = re.sub(r'\buse\s*=\s*true\b', 'use = false', text)
-              else:
-                  new_text = re.sub(r'\buse\s*=\s*false\b', 'use = true', text)
+          def patch_app(src):
+              if old_app not in src:
+                  raise SystemExit(f"[!] {old_app} not found in {ext_path}; source changed")
+              return src.replace(old_app, new_app)
 
-              if new_text != text:
-                  text = new_text
-                  modified = True
+          rewrite(ext_path, patch_app)
+          print("[+] TELEGRAM_APPLICATION -> org.telegram.messenger.ApplicationLoader")
 
-              if modified:
-                  with open(path, "w", encoding="utf-8") as f:
-                      f.write(text)
+          # ---- 5. Final sanity check --------------------------------------------------
+          with open(compat_path, encoding="utf-8") as f:
+              assert f'"{ayu_pkg}"' in f.read(), "compat package rewrite missing"
+          with open(ext_path, encoding="utf-8") as f:
+              assert new_app in f.read(), "application class rewrite missing"
 
           print("[+] Successfully configured auth and AyuGram patch compatibility.")
 
@@ -161,28 +159,29 @@ jobs:
         run: |
           import os, glob, re, json, datetime
 
-          mpp_files = glob.glob("patches/build/**/*.mpp", recursive=True)
+          mpp_files = sorted(glob.glob("patches/build/**/*.mpp", recursive=True))
           if not mpp_files:
               raise SystemExit("Error: .mpp file was not generated!")
 
           mpp_path = mpp_files[0]
           mpp_filename = os.path.basename(mpp_path)
-          m = re.match(r"patches-(.*)\.mpp", mpp_filename)
-          version = m.group(1) if m else "0.0.23"
+          m = re.match(r"patches-(.+)\.mpp$", mpp_filename)
+          if not m:
+              raise SystemExit(f"Error: cannot read the version from '{mpp_filename}'")
+          version = m.group(1)
           tag = f"v{version}-ayugram"
           repo = os.environ["REPO"]
           ayu_pkg = os.environ.get("AYU_PKG", "com.radolyn.ayugram").strip() or "com.radolyn.ayugram"
           download_url = f"https://github.com/{repo}/releases/download/{tag}/{mpp_filename}"
 
-          gh_out = os.environ["GITHUB_OUTPUT"]
-          with open(gh_out, "a", encoding="utf-8") as out:
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"mpp_path={mpp_path}\n")
               out.write(f"mpp_filename={mpp_filename}\n")
               out.write(f"version={version}\n")
               out.write(f"tag={tag}\n")
 
           bundle_data = {
-              "created_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+              "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
               "description": f"Custom HushTelegram build for AyuGram ({ayu_pkg}) - Hide sender names when forwarding",
               "download_url": download_url,
               "signature_download_url": "",
@@ -190,16 +189,18 @@ jobs:
           }
           with open("patches-bundle.json", "w", encoding="utf-8") as f:
               json.dump(bundle_data, f, indent=2)
+          print(f"[+] Bundle {mpp_filename} -> {tag}")
 
       - name: Create GitHub Release with .mpp Bundle
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.bundle.outputs.tag }}
           name: "HushTelegram for AyuGram (${{ steps.bundle.outputs.tag }})"
-          body: "Custom Morphe patch bundle targeting AyuGram with **Hide sender names when forwarding** isolated."
+          body: "Custom Morphe patch bundle targeting AyuGram with **Hide sender names when forwarding**."
           files: |
             ${{ steps.bundle.outputs.mpp_path }}
             patches-list.json
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
