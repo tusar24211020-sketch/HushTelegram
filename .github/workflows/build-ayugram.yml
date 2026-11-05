@@ -69,14 +69,11 @@ jobs:
               existing = prop_path.read_text(encoding="utf-8") if prop_path.exists() else ""
               prop_path.write_text(existing + creds_block, encoding="utf-8")
 
-          # Disable Gradle dependency verification at the source: Gradle only enforces
-          # verification if gradle/verification-metadata.xml exists, so removing it
-          # (plus --dependency-verification=off in the build step) prevents failures
-          # like a junit-bom checksum mismatch without relying on any undocumented flag.
+          # Remove stale dependency verification metadata (junit-bom checksum mismatch).
           for meta_path in glob.glob("**/gradle/verification-metadata.xml", recursive=True):
               try:
                   os.remove(meta_path)
-                  print(f"[*] Removed {meta_path} to prevent verification failures")
+                  print(f"[*] Removed {meta_path}")
               except OSError as e:
                   print(f"[!] Could not remove {meta_path}: {e}")
 
@@ -84,7 +81,7 @@ jobs:
           ayu_ver = os.environ.get("AYU_VER", "").strip()
 
           print(f"[*] Target Package: {ayu_pkg}")
-          print(f"[*] Target Version: {ayu_ver if ayu_ver else 'ALL (Universal)'}")
+          print(f"[*] Target Version: {ayu_ver if ayu_ver else 'upstream default (unchanged)'}")
 
           compat_files = glob.glob("patches/src/main/kotlin/**/AppCompatibilities.kt", recursive=True)
           for path in compat_files:
@@ -93,30 +90,13 @@ jobs:
 
               content = content.replace('"org.telegram.messenger.web"', f'"{ayu_pkg}"')
 
+              # IMPORTANT: never null out version strings. AppTarget throws
+              # "Version codes requires declaring a version string" if a version
+              # code is declared while the version is null. Version strings are
+              # only replaced when the user explicitly supplies a version.
               if ayu_ver:
                   content = content.replace('"13.1.0"', f'"{ayu_ver}"')
                   content = content.replace('"13.1.1"', f'"{ayu_ver}"')
-              else:
-                  # Strip AppTarget(version = "...") calls where version leads the
-                  # argument list — these are self-contained and safe to remove whole.
-                  content = re.sub(r'AppTarget\s*\(\s*version\s*=\s*"[^"]+"[^)]*\)', '', content)
-
-                  # Only const val declarations need rewriting: a bare `null` is not a
-                  # valid const val (Kotlin: TYPE_CANT_BE_USED_FOR_CONST_VAL). Any other
-                  # remaining occurrence of these literals — e.g. inside an AppTarget(...)
-                  # call that also declares versionCode — is left untouched. Nulling it
-                  # there would violate AppTarget's own runtime invariant ("Version codes
-                  # requires declaring a version string"): it compiles fine but throws
-                  # an IllegalArgumentException the moment generatePatchesList constructs
-                  # that patch.
-                  new_lines = []
-                  for line in content.split('\n'):
-                      if re.search(r'\bconst\s+val\b', line) and re.search(r'"13\.1\.[01]"', line):
-                          line = re.sub(r'\bconst\s+val\b', 'val', line)
-                          line = re.sub(r':\s*String\b(?!\?)', ': String?', line)
-                          line = re.sub(r'"13\.1\.[01]"', 'null', line)
-                      new_lines.append(line)
-                  content = '\n'.join(new_lines)
 
               with open(path, "w", encoding="utf-8") as f:
                   f.write(content)
@@ -148,14 +128,12 @@ jobs:
 
               if not is_target_patch:
                   new_text = re.sub(r'\buse\s*=\s*true\b', 'use = false', text)
-                  if new_text != text:
-                      text = new_text
-                      modified = True
               else:
                   new_text = re.sub(r'\buse\s*=\s*false\b', 'use = true', text)
-                  if new_text != text:
-                      text = new_text
-                      modified = True
+
+              if new_text != text:
+                  text = new_text
+                  modified = True
 
               if modified:
                   with open(path, "w", encoding="utf-8") as f:
