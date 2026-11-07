@@ -317,18 +317,19 @@ jobs:
 
           print("[+] Successfully configured auth and AyuGram patch compatibility.")
 
+      - name: Set up Python (for icon generation)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pillow
+        run: python -m pip install --disable-pip-version-check pillow
+
       - name: Generate Telegram Web-style launcher icon
         shell: python
         run: |
-          import os, subprocess, sys
-
-          try:
-              from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageChops
-          except ImportError:
-              for extra in ([], ["--break-system-packages"]):
-                  if subprocess.call([sys.executable, "-m", "pip", "install", "--quiet", "pillow", *extra]) == 0:
-                      break
-              from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageChops
+          import os
+          from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageChops
 
           OUT = "patches/src/main/resources/hushtelegram/icon"
           if not os.path.isdir(OUT):
