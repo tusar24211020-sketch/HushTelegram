@@ -2345,7 +2345,7 @@
       "name": "HushTelegram icon and name",
       "description": "Gives your patched Telegram HushTelegram's own home screen icon, with a themed version on Android 13 and up, and can change the name under it. An alternate icon picked in Telegram's settings keeps its own look. It isn't selected by default. Turn on Expert mode in Morphe Manager to pick it and name the app. Only patching again without it puts Telegram's icon back.",
       "category": "Interface",
-      "use": false,
+      "use": true,
       "dependencies": [],
       "compatiblePackages": {
         "org.telegram.messenger": [
@@ -2400,7 +2400,7 @@
           "description": "The name under the icon, up to 30 characters. Leave it empty to keep Telegram.",
           "required": false,
           "type": "kotlin.String",
-          "default": null,
+          "default": "TelegramT",
           "values": null
         },
         {
