@@ -149,6 +149,162 @@ jobs:
           rewrite(settings_path, patch_native)
           print("[+] Native settings row skipped (AyuGram's settings screen differs)")
 
+          # ---- 4c. App name + icon: look like Telegram --------------------------------
+          # The icon patch is off by default, expects Telegram's launcher alias, and draws
+          # HushTelegram's own badge. For AyuGram: select it by default, use AyuGram's launcher
+          # alias, default the app name to "TelegramT", and use Telegram's blue behind the icon
+          # (the Telegram-style pictures themselves are generated in the next step).
+          icon_path = "patches/src/main/kotlin/app/morphe/patches/telegram/misc/branding/HushTelegramIconPatch.kt"
+          icon_edits = [
+              ('internal const val ICON_BACKGROUND = "#FF00218A"',
+               'internal const val ICON_BACKGROUND = "#FF2AABEE"'),
+              ('internal const val DEFAULT_ICON = "org.telegram.messenger.DefaultIcon"',
+               'internal const val DEFAULT_ICON = "com.exteragram.messenger.DefaultIcon"'),
+              ('key = "appName", default = null, title = "App name",',
+               'key = "appName", default = "TelegramT", title = "App name",'),
+              ('    default = false,\n) {\n    category("Interface")',
+               '    default = true,\n) {\n    category("Interface")'),
+          ]
+
+          def patch_icon(src):
+              for old, new in icon_edits:
+                  if src.count(old) != 1:
+                      raise SystemExit(f"[!] expected exactly one {old!r} in {icon_path}; source changed")
+                  src = src.replace(old, new)
+              return src
+
+          rewrite(icon_path, patch_icon)
+          print("[+] Icon patch: on by default, name 'TelegramT', AyuGram launcher alias")
+
+          # ---- 4d. Best-effort mode: a patch that does not fit AyuGram is skipped --------
+          # Morphe stops the whole run at the first patch that throws. AyuGram is a fork, so some
+          # of the ~67 patches may not find their hook point. Each patch's execute { } block is
+          # wrapped so a failure is logged ("Skipped patch <name>: <reason>") and the others
+          # still apply. These stay strict, because everything else depends on them or because
+          # silently skipping them would hide a problem you asked for: the extension hook, the
+          # settings patch, its manifest patch, the icon/name patch and "Hide sender names".
+          import re
+
+          def _skip_line_comment(s, i):
+              j = s.find("\n", i)
+              return len(s) if j < 0 else j + 1
+
+          def _skip_block_comment(s, i):          # Kotlin block comments nest
+              depth, n = 0, len(s)
+              while i < n:
+                  if s.startswith("/*", i): depth += 1; i += 2
+                  elif s.startswith("*/", i):
+                      depth -= 1; i += 2
+                      if depth == 0: return i
+                  else: i += 1
+              raise ValueError("unterminated block comment")
+
+          def _skip_char(s, i):
+              i += 1
+              if s[i] == "\\":
+                  i += 2
+                  while s[i] != "'": i += 1
+                  return i + 1
+              return i + 2                         # 'x'
+
+          def _skip_string(s, i):
+              raw = s.startswith('"""', i)
+              i += 3 if raw else 1
+              n = len(s)
+              while i < n:
+                  c = s[i]
+                  if raw and s.startswith('"""', i):
+                      i += 3
+                      while i < n and s[i] == '"': i += 1     # extra quotes belong to the string's end
+                      return i
+                  if not raw and c == '"': return i + 1
+                  if not raw and c == "\\": i += 2; continue
+                  if c == "$" and s.startswith("${", i):
+                      i = scan(s, i + 2, True) + 1
+                      continue
+                  i += 1
+              raise ValueError("unterminated string")
+
+          def scan(s, i, stop_on_close):
+              """Walk Kotlin code from i. With stop_on_close, return the index of the unmatched '}'.
+              Otherwise return len(s) and raise if braces do not balance."""
+              depth, n = 0, len(s)
+              while i < n:
+                  c = s[i]
+                  if c == "/" and s.startswith("//", i): i = _skip_line_comment(s, i)
+                  elif c == "/" and s.startswith("/*", i): i = _skip_block_comment(s, i)
+                  elif c == '"': i = _skip_string(s, i)
+                  elif c == "'": i = _skip_char(s, i)
+                  elif c == "{": depth += 1; i += 1
+                  elif c == "}":
+                      if depth == 0:
+                          if stop_on_close: return i
+                          raise ValueError("unbalanced }")
+                      depth -= 1; i += 1
+                  else: i += 1
+              if stop_on_close or depth: raise ValueError("unbalanced {")
+              return n
+
+          def code_positions(s, pattern):
+              """Matches of regex `pattern` that sit in real code (not comments or strings)."""
+              rx, out, i, n = re.compile(pattern), [], 0, len(s)
+              while i < n:
+                  c = s[i]
+                  if c == "/" and s.startswith("//", i): i = _skip_line_comment(s, i); continue
+                  if c == "/" and s.startswith("/*", i): i = _skip_block_comment(s, i); continue
+                  if c == '"': i = _skip_string(s, i); continue
+                  if c == "'": i = _skip_char(s, i); continue
+                  m = rx.match(s, i)
+                  if m: out.append(m); i = m.end(); continue
+                  i += 1
+              return out
+
+          PATCH_DECL = re.compile(r'(?:val|fun)\s+(\w+)\b[^{};]*?=\s*(?:bytecodePatch|resourcePatch|rawResourcePatch)\b')
+          EXECUTE = r'(?<![\w.@])execute\s*\{'
+
+          def wrap_executes(src, label, fatal):
+              """Wrap each patch's `execute { ... }` so a failure is logged and skipped, not fatal."""
+              decls = [(m.start(), m.group(1)) for m in PATCH_DECL.finditer(src)]
+              found = code_positions(src, EXECUTE)
+              edits, wrapped, kept = [], 0, 0
+              for m in found:
+                  owner = None
+                  for pos, name in decls:
+                      if pos < m.start(): owner = name
+                  if owner in fatal: kept += 1; continue
+                  open_i = m.end() - 1
+                  close_i = scan(src, open_i + 1, True)
+                  who = (owner or label)
+                  head = ("{\n        try {\n")
+                  tail = ("\n        } catch (hushSkipped: Exception) {\n"
+                          f"            java.util.logging.Logger.getLogger(\"HushTelegram\").warning(\n"
+                          f"                \"Skipped patch {who}: \" + (hushSkipped.message ?: hushSkipped.toString()))\n"
+                          "        }\n        Unit\n    }")
+                  edits.append((open_i, close_i, head, tail)); wrapped += 1
+              for open_i, close_i, head, tail in sorted(edits, reverse=True):
+                  src = src[:open_i] + head + src[open_i + 1:close_i] + tail + src[close_i + 1:]
+              return src, wrapped, kept
+
+
+          STRICT = {"telegramExtensionPatch", "settingsPatch", "settingsManifestPatch",
+                    "hushTelegramIconPatch", "forwardHideSenderPatch"}
+          wrapped_total = strict_total = 0
+          for path in glob.glob("patches/src/main/kotlin/app/morphe/patches/telegram/**/*.kt", recursive=True):
+              with open(path, "r", encoding="utf-8") as f:
+                  original = f.read()
+              if not code_positions(original, EXECUTE):
+                  continue
+              new_src, wrapped, strict = wrap_executes(original, os.path.basename(path)[:-3], STRICT)
+              scan(new_src, 0, False)  # braces must still balance, or fail now rather than in Gradle
+              if wrapped:
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(new_src)
+              wrapped_total += wrapped
+              strict_total += strict
+          if wrapped_total < 40:
+              raise SystemExit(f"[!] only {wrapped_total} patches wrapped; the patch source layout changed")
+          print(f"[+] Best-effort mode: {wrapped_total} patches can be skipped, {strict_total} stay strict")
+
           # ---- 5. Final sanity check --------------------------------------------------
           with open(compat_path, encoding="utf-8") as f:
               assert f'"{ayu_pkg}"' in f.read(), "compat package rewrite missing"
@@ -156,8 +312,114 @@ jobs:
               assert new_app in f.read(), "application class rewrite missing"
           with open(settings_path, encoding="utf-8") as f:
               assert new_gate in f.read(), "native row skip missing"
+          with open(icon_path, encoding="utf-8") as f:
+              assert "com.exteragram.messenger.DefaultIcon" in f.read(), "icon alias rewrite missing"
 
           print("[+] Successfully configured auth and AyuGram patch compatibility.")
+
+      - name: Generate Telegram Web-style launcher icon
+        shell: python
+        run: |
+          import os, subprocess, sys
+
+          try:
+              from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageChops
+          except ImportError:
+              for extra in ([], ["--break-system-packages"]):
+                  if subprocess.call([sys.executable, "-m", "pip", "install", "--quiet", "pillow", *extra]) == 0:
+                      break
+              from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageChops
+
+          OUT = "patches/src/main/resources/hushtelegram/icon"
+          if not os.path.isdir(OUT):
+              raise SystemExit(f"[!] {OUT} not found; the icon patch layout changed")
+
+          SS = 4
+          TOP, BOTTOM = (0x4F, 0xC3, 0xF7), (0x1A, 0x8C, 0xD0)
+          PLANE_LEFT = [(0.215, 0.490), (0.785, 0.265), (0.455, 0.620)]
+          PLANE_RIGHT = [(0.455, 0.620), (0.785, 0.265), (0.675, 0.745)]
+          FLAP = [(0.455, 0.620), (0.500, 0.800), (0.575, 0.685)]
+          C_LEFT, C_RIGHT, C_FLAP = (255, 255, 255, 255), (0xE4, 0xEF, 0xF8, 255), (0xB9, 0xCF, 0xE3, 255)
+
+          def pts(shape, x0, w):
+              return [(x0 + px * w, x0 + py * w) for px, py in shape]
+
+          def plane(big, frac, with_shadow):
+              """Paper plane on a transparent big x big canvas."""
+              w = big * frac
+              x0 = (big - w) / 2
+              out = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+              if with_shadow:
+                  sh = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+                  d = ImageDraw.Draw(sh)
+                  dy = w * 0.022
+                  for shape in (PLANE_LEFT, PLANE_RIGHT, FLAP):
+                      d.polygon([(x, y + dy) for x, y in pts(shape, x0, w)], fill=(0, 40, 90, 120))
+                  out.alpha_composite(sh.filter(ImageFilter.GaussianBlur(w * 0.025)))
+              d = ImageDraw.Draw(out)
+              d.polygon(pts(FLAP, x0, w), fill=C_FLAP)
+              d.polygon(pts(PLANE_RIGHT, x0, w), fill=C_RIGHT)
+              d.polygon(pts(PLANE_LEFT, x0, w), fill=C_LEFT)
+              return out
+
+          def background(big):
+              grad = Image.linear_gradient("L").resize((big, big), Image.BILINEAR)
+              bg = ImageOps.colorize(grad, black=TOP, white=BOTTOM).convert("RGBA")
+              # soft glossy highlight over the upper part, fading out by the middle
+              fade = ImageOps.invert(grad).point(lambda v: max(0, v - 128) * 2 * 40 // 255)
+              gloss = Image.new("RGBA", (big, big), (255, 255, 255, 0))
+              gloss.putalpha(fade)
+              bg.alpha_composite(gloss)
+              return bg
+
+          def circle_mask(big):
+              m = Image.new("L", (big, big), 0)
+              ImageDraw.Draw(m).ellipse((0, 0, big - 1, big - 1), fill=255)
+              return m
+
+          def badge(size):
+              """Round glossy badge (legacy launchers)."""
+              big = size * SS
+              im = background(big)
+              im.alpha_composite(plane(big, 0.98, True))
+              d = ImageDraw.Draw(im)
+              rim = big * 0.012
+              ring = Image.new("L", (big, big), 0)
+              ImageDraw.Draw(ring).ellipse((rim, rim, big - 1 - rim, big - 1 - rim), outline=255, width=max(1, round(rim)))
+              ring = ring.point(lambda v: v * 70 // 255)
+              white = Image.new("RGBA", (big, big), (255, 255, 255, 0)); white.putalpha(ring)
+              im.alpha_composite(white)
+              im.putalpha(ImageChops.multiply(im.getchannel("A"), circle_mask(big)))
+              return im.resize((size, size), Image.LANCZOS)
+
+          def adaptive_foreground(size):
+              """Full-bleed gradient + plane, so the launcher's own mask shapes it."""
+              big = size * SS
+              im = background(big)
+              im.alpha_composite(plane(big, 0.667, True))
+              return im.resize((size, size), Image.LANCZOS)
+
+          def adaptive_mono(size):
+              big = size * SS
+              p = plane(big, 0.667, False)
+              a = p.getchannel("A").point(lambda v: 255 if v > 0 else 0)
+              out = Image.new("RGBA", (big, big), (0, 0, 0, 0)); out.putalpha(a)
+              return out.resize((size, size), Image.LANCZOS)
+
+          # Pixel size per density: legacy icon = 48dp, adaptive layers = 108dp.
+          DENSITIES = {"mdpi": 1.0, "hdpi": 1.5, "xhdpi": 2.0, "xxhdpi": 3.0, "xxxhdpi": 4.0}
+          for density, scale in DENSITIES.items():
+              folder = os.path.join(OUT, f"mipmap-{density}")
+              os.makedirs(folder, exist_ok=True)
+              legacy = round(48 * scale)
+              canvas = Image.new("RGBA", (legacy, legacy), (0, 0, 0, 0))
+              inner = badge(round(legacy * 44 / 48))
+              canvas.alpha_composite(inner, ((legacy - inner.width) // 2, (legacy - inner.height) // 2))
+              canvas.save(os.path.join(folder, "hush_launcher.png"))
+              layer = round(108 * scale)
+              adaptive_foreground(layer).save(os.path.join(folder, "hush_launcher_foreground.png"))
+              adaptive_mono(layer).save(os.path.join(folder, "hush_launcher_monochrome.png"))
+          print("[+] Telegram Web-style launcher icon generated for", ", ".join(DENSITIES))
 
       - name: Build Morphe Patch Bundle (.mpp)
         env:
